@@ -1,0 +1,134 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: af-alg-workload-script
+  namespace: af-alg-workload
+  annotations:
+    kubernetes.io/description: AF_ALG socket validation workload.
+data:
+  af_alg_workload.py: |
+    #!/usr/bin/env python3
+    """AF_ALG socket validation workload.
+
+    Opens persistent AF_ALG sockets (hash, skcipher) and holds them open
+    for the lifetime of the process, periodically exercising them.
+    Useful for verifying detection of in-use AF_ALG sockets.
+    """
+    import os
+    import signal
+    import socket
+    import struct
+    import sys
+    import time
+
+    SOL_ALG = 279
+    ALG_SET_KEY = 1
+    ALG_SET_IV = 2
+    ALG_SET_OP = 3
+    ALG_OP_ENCRYPT = 0
+    ALG_OP_DECRYPT = 1
+
+    INTERVAL = 10
+
+    running = True
+
+    def shutdown(signum, frame):
+        global running
+        print(f"Caught signal {signum}, shutting down...")
+        running = False
+
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
+    def open_hash(algo):
+        s = socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)
+        s.bind(("hash", algo))
+        print(f"  opened hash/{algo} fd={s.fileno()}")
+        return s
+
+    def open_skcipher(algo, key):
+        s = socket.socket(socket.AF_ALG, socket.SOCK_SEQPACKET, 0)
+        s.bind(("skcipher", algo))
+        s.setsockopt(SOL_ALG, ALG_SET_KEY, key)
+        print(f"  opened skcipher/{algo} fd={s.fileno()}")
+        return s
+
+    def use_hash(s, algo, data):
+        op, _ = s.accept()
+        op.send(data)
+        digest = op.recv(256)
+        op.close()
+        return digest
+
+    def use_skcipher(s, algo, iv, plaintext):
+        op, _ = s.accept()
+        op.sendmsg(
+            [plaintext],
+            [
+                (SOL_ALG, ALG_SET_OP, struct.pack("I", ALG_OP_ENCRYPT)),
+                (SOL_ALG, ALG_SET_IV, struct.pack("I", len(iv)) + iv),
+            ],
+        )
+        ciphertext = op.recv(len(plaintext) + 64)
+        op.close()
+
+        op2, _ = s.accept()
+        op2.sendmsg(
+            [ciphertext],
+            [
+                (SOL_ALG, ALG_SET_OP, struct.pack("I", ALG_OP_DECRYPT)),
+                (SOL_ALG, ALG_SET_IV, struct.pack("I", len(iv)) + iv),
+            ],
+        )
+        recovered = op2.recv(len(plaintext) + 64)
+        op2.close()
+        return recovered == plaintext
+
+    print("=== AF_ALG Socket Validation Workload ===")
+    print(f"PID: {os.getpid()}")
+    print()
+
+    print("Opening persistent AF_ALG sockets...")
+    sockets = {}
+    try:
+        sockets["sha256"] = open_hash("sha256")
+        sockets["sha512"] = open_hash("sha512")
+        sockets["cbc(aes)"] = open_skcipher("cbc(aes)", os.urandom(32))
+        sockets["ecb(aes)"] = open_skcipher("ecb(aes)", os.urandom(16))
+    except OSError as e:
+        print(f"Failed to open AF_ALG socket: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Holding {len(sockets)} AF_ALG sockets open.")
+    print()
+
+    sys.stdout.flush()
+    iteration = 0
+    while running:
+        iteration += 1
+        print(f"[iteration {iteration}]")
+
+        digest = use_hash(sockets["sha256"], "sha256", b"hello world")
+        print(f"  hash/sha256    digest={digest.hex()[:16]}...")
+
+        digest = use_hash(sockets["sha512"], "sha512", b"hello world")
+        print(f"  hash/sha512    digest={digest.hex()[:16]}...")
+
+        iv = os.urandom(16)
+        ok = use_skcipher(sockets["cbc(aes)"], "cbc(aes)", iv, os.urandom(64))
+        print(f"  skcipher/cbc(aes)  round-trip={'ok' if ok else 'FAIL'}")
+
+        ok = use_skcipher(sockets["ecb(aes)"], "ecb(aes)", b"", os.urandom(16))
+        print(f"  skcipher/ecb(aes)  round-trip={'ok' if ok else 'FAIL'}")
+
+        sys.stdout.flush()
+        for _ in range(INTERVAL):
+            if not running:
+                break
+            time.sleep(1)
+
+    print()
+    print("Closing sockets...")
+    for name, s in sockets.items():
+        print(f"  closing {name} fd={s.fileno()}")
+        s.close()
+    print("Done.")

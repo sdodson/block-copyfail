@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <bpf/libbpf.h>
+#include <bpf/bpf.h>
 #include "mitigations.h"
 #include "mitigations.skel.h"
 
@@ -18,8 +19,9 @@ static void sig_handler(int sig)
 struct mitigation_flags {
 	int copyfail;
 	int rxrpc;
-	int xfrm;
 	int udp_splice;
+	int espintcp;
+	int udp_encap;
 };
 
 static void parse_mitigations(struct mitigation_flags *f)
@@ -27,11 +29,13 @@ static void parse_mitigations(struct mitigation_flags *f)
 	const char *env = getenv("MITIGATIONS");
 
 	if (!env || !*env || strcmp(env, "all") == 0) {
-		f->copyfail = f->rxrpc = f->xfrm = f->udp_splice = 1;
+		f->copyfail = f->rxrpc = f->udp_splice = 1;
+		f->espintcp = f->udp_encap = 1;
 		return;
 	}
 
-	f->copyfail = f->rxrpc = f->xfrm = f->udp_splice = 0;
+	f->copyfail = f->rxrpc = f->udp_splice = 0;
+	f->espintcp = f->udp_encap = 0;
 
 	char buf[256];
 	strncpy(buf, env, sizeof(buf) - 1);
@@ -40,21 +44,52 @@ static void parse_mitigations(struct mitigation_flags *f)
 	for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
 		while (*tok == ' ') tok++;
 		if (strcmp(tok, "all") == 0) {
-			f->copyfail = f->rxrpc = f->xfrm = f->udp_splice = 1;
+			f->copyfail = f->rxrpc = f->udp_splice = 1;
+			f->espintcp = f->udp_encap = 1;
 		} else if (strcmp(tok, "copyfail") == 0) {
 			f->copyfail = 1;
 		} else if (strcmp(tok, "dirtyfrag") == 0) {
-			f->rxrpc = f->xfrm = f->udp_splice = 1;
+			f->rxrpc = f->udp_splice = 1;
+			f->espintcp = f->udp_encap = 1;
 		} else if (strcmp(tok, "rxrpc") == 0) {
 			f->rxrpc = 1;
-		} else if (strcmp(tok, "xfrm") == 0) {
-			f->xfrm = 1;
 		} else if (strcmp(tok, "udp_splice") == 0) {
 			f->udp_splice = 1;
+		} else if (strcmp(tok, "espintcp") == 0) {
+			f->espintcp = 1;
+		} else if (strcmp(tok, "udp_encap") == 0) {
+			f->udp_encap = 1;
 		} else {
 			fprintf(stderr, "mitigation-loader: unknown mitigation '%s', ignoring\n", tok);
 		}
 	}
+}
+
+static int populate_init_net_ns(struct mitigations_bpf *skel)
+{
+	char link[64];
+	ssize_t len = readlink("/proc/1/ns/net", link, sizeof(link) - 1);
+	if (len < 0) {
+		fprintf(stderr, "mitigation-loader: failed to read /proc/1/ns/net\n");
+		return -1;
+	}
+	link[len] = '\0';
+
+	__u32 inum = 0;
+	if (sscanf(link, "net:[%u]", &inum) != 1) {
+		fprintf(stderr, "mitigation-loader: failed to parse net ns inum from '%s'\n", link);
+		return -1;
+	}
+
+	__u32 key = 0;
+	int fd = bpf_map__fd(skel->maps.init_net_ns);
+	if (bpf_map_update_elem(fd, &key, &inum, BPF_ANY)) {
+		fprintf(stderr, "mitigation-loader: failed to populate init_net_ns map\n");
+		return -1;
+	}
+
+	fprintf(stderr, "mitigation-loader: init net namespace inum=%u\n", inum);
+	return 0;
 }
 
 static __u64 boot_time_ns;
@@ -72,11 +107,12 @@ static int handle_event(void *ctx, void *data, size_t len)
 
 	strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
 	switch (evt->reason) {
-	case BLOCK_REASON_COPYFAIL:   what = "AF_ALG AEAD bind";      break;
-	case BLOCK_REASON_RXRPC:      what = "AF_RXRPC socket";       break;
-	case BLOCK_REASON_XFRM:       what = "XFRM from container";   break;
-	case BLOCK_REASON_UDP_SPLICE: what = "UDP MSG_SPLICE_PAGES";  break;
-	default:                      what = "unknown";               break;
+	case BLOCK_REASON_COPYFAIL:   what = "AF_ALG AEAD bind";         break;
+	case BLOCK_REASON_RXRPC:      what = "AF_RXRPC socket";          break;
+	case BLOCK_REASON_UDP_SPLICE: what = "UDP MSG_SPLICE_PAGES";     break;
+	case BLOCK_REASON_ESPINTCP:   what = "TCP_ULP espintcp";         break;
+	case BLOCK_REASON_UDP_ENCAP:  what = "UDP_ENCAP from container"; break;
+	default:                      what = "unknown";                  break;
 	}
 	fprintf(stderr, "mitigation-loader: BLOCKED %s pid=%-8u comm=%.*s time=%s\n",
 		what, evt->pid, 16, evt->comm, ts);
@@ -91,7 +127,8 @@ int main(int argc, char **argv)
 
 	parse_mitigations(&flags);
 
-	if (!flags.copyfail && !flags.rxrpc && !flags.xfrm && !flags.udp_splice) {
+	if (!flags.copyfail && !flags.rxrpc && !flags.udp_splice &&
+	    !flags.espintcp && !flags.udp_encap) {
 		fprintf(stderr, "mitigation-loader: no mitigations enabled, exiting\n");
 		return 1;
 	}
@@ -106,13 +143,22 @@ int main(int argc, char **argv)
 		bpf_program__set_autoattach(skel->progs.block_copyfail, false);
 	if (!flags.rxrpc)
 		bpf_program__set_autoattach(skel->progs.block_rxrpc, false);
-	if (!flags.xfrm)
-		bpf_program__set_autoattach(skel->progs.block_xfrm, false);
 	if (!flags.udp_splice)
 		bpf_program__set_autoattach(skel->progs.block_udp_splice, false);
+	if (!flags.espintcp) {
+		bpf_program__set_autoattach(skel->progs.tp_setsockopt, false);
+		bpf_program__set_autoattach(skel->progs.block_espintcp, false);
+	}
+	if (!flags.udp_encap)
+		bpf_program__set_autoattach(skel->progs.block_udp_encap, false);
 
 	if (mitigations_bpf__load(skel)) {
 		fprintf(stderr, "mitigation-loader: failed to load BPF programs\n");
+		mitigations_bpf__destroy(skel);
+		return 1;
+	}
+
+	if (flags.udp_encap && populate_init_net_ns(skel)) {
 		mitigations_bpf__destroy(skel);
 		return 1;
 	}
@@ -126,8 +172,9 @@ int main(int argc, char **argv)
 	fprintf(stderr, "mitigation-loader: active mitigations:");
 	if (flags.copyfail)   fprintf(stderr, " copyfail");
 	if (flags.rxrpc)      fprintf(stderr, " rxrpc");
-	if (flags.xfrm)       fprintf(stderr, " xfrm");
 	if (flags.udp_splice) fprintf(stderr, " udp_splice");
+	if (flags.espintcp)   fprintf(stderr, " espintcp");
+	if (flags.udp_encap)  fprintf(stderr, " udp_encap");
 	fprintf(stderr, "\n");
 
 	rb = ring_buffer__new(bpf_map__fd(skel->maps.events),

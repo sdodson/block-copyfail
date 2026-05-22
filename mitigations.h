@@ -10,8 +10,9 @@
 
 #define BLOCK_REASON_COPYFAIL    1
 #define BLOCK_REASON_RXRPC       2
-#define BLOCK_REASON_XFRM        3
-#define BLOCK_REASON_UDP_SPLICE  4
+#define BLOCK_REASON_UDP_SPLICE  3
+#define BLOCK_REASON_ESPINTCP    4
+#define BLOCK_REASON_UDP_ENCAP   5
 
 struct block_event {
 	__u32 pid;

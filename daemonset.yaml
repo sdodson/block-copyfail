@@ -75,6 +75,9 @@ spec:
       containers:
       - name: blocker
         image: registry.redhat.io/openshift4/ose-block-copyfail-rhel9@sha256:2ad45164bed4ef8b8661175ac02e891b8bf2bdcdf69bed3526777b4746c3b46a
+        env:
+        - name: MITIGATIONS
+          value: "all"
         securityContext:
           privileged: true
         volumeMounts:

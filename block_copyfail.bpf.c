@@ -1,10 +1,12 @@
-/* BPF LSM program to block CVE-2026-31431.
+/* BPF LSM programs to block kernel page-cache corruption exploits.
  *
- * Hooks socket_bind and blocks all AF_ALG AEAD binds — the subsystem
- * exploited by Copy Fail.  The vulnerability is in algif_aead, and
- * authencesn can be nested inside wrapper templates (e.g. pcrypt),
- * so blocking the entire AEAD type is the only bypass-proof approach.
- * Other AF_ALG usage (hash, skcipher, rng) is unaffected.
+ * CopyFail (CVE-2026-31431):
+ *   socket_bind — blocks AF_ALG AEAD binds (algif_aead exploit path).
+ *
+ * DirtyFrag:
+ *   socket_create — blocks AF_RXRPC socket creation (rxrpc/rxkad path).
+ *   socket_create — blocks NETLINK_XFRM from containers (xfrm-ESP path).
+ *   socket_sendmsg — blocks MSG_SPLICE_PAGES on UDP sockets globally.
  */
 
 #include <linux/types.h>
@@ -12,28 +14,86 @@
 #include <linux/errno.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_core_read.h>
 #include "block_copyfail.h"
 
-struct socket;
-struct sockaddr;
+/* --- CopyFail: sockaddr_alg layout for AF_ALG AEAD detection --- */
 
-/* struct sockaddr_alg layout (from linux/if_alg.h):
- *   offset 0:  __u16  salg_family
- *   offset 2:  __u8   salg_type[14]
- *   offset 16: __u32  salg_feat
- *   offset 20: __u32  salg_mask
- *   offset 24: __u8   salg_name[64]
- * We only need 7 bytes to check salg_type == "aead\0".
- */
 #define SOCKADDR_ALG_TYPE_OFFSET 2
 #define SOCKADDR_ALG_CHECK_LEN 7
 
 static const char aead_type[5] = "aead";
 
+/* --- DirtyFrag: CO-RE struct stubs --- */
+
+struct user_namespace {
+	int level;
+} __attribute__((preserve_access_index));
+
+struct pid_namespace {
+	unsigned int level;
+} __attribute__((preserve_access_index));
+
+struct cred {
+	struct user_namespace *user_ns;
+} __attribute__((preserve_access_index));
+
+struct nsproxy {
+	struct pid_namespace *pid_ns_for_children;
+} __attribute__((preserve_access_index));
+
+struct task_struct {
+	const struct cred *cred;
+	struct nsproxy *nsproxy;
+} __attribute__((preserve_access_index));
+
+struct sock_common {
+	unsigned short skc_family;
+} __attribute__((preserve_access_index));
+
+struct sock {
+	struct sock_common __sk_common;
+} __attribute__((preserve_access_index));
+
+struct socket {
+	short type;
+	struct sock *sk;
+} __attribute__((preserve_access_index));
+
+struct msghdr {
+	unsigned int msg_flags;
+} __attribute__((preserve_access_index));
+
+struct sockaddr;
+
+#define AF_NETLINK        16
+#define AF_INET            2
+#define AF_INET6          10
+#define NETLINK_XFRM       6
+#define SOCK_DGRAM         2
+#define MSG_SPLICE_PAGES   0x08000000
+
+/* --- Shared ring buffer --- */
+
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 4096);
 } events SEC(".maps");
+
+static __always_inline void emit_event(__u32 reason)
+{
+	struct block_event *evt;
+	evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
+	if (evt) {
+		evt->pid = bpf_get_current_pid_tgid() >> 32;
+		bpf_get_current_comm(evt->comm, sizeof(evt->comm));
+		evt->reason = reason;
+		evt->ts = bpf_ktime_get_ns();
+		bpf_ringbuf_submit(evt, 0);
+	}
+}
+
+/* === CopyFail: block AF_ALG AEAD binds === */
 
 SEC("lsm/socket_bind")
 int BPF_PROG(block_copyfail, struct socket *sock,
@@ -57,16 +117,87 @@ int BPF_PROG(block_copyfail, struct socket *sock,
 	if (__builtin_memcmp(&buf[SOCKADDR_ALG_TYPE_OFFSET], aead_type, 5) != 0)
 		return 0;
 
-	struct block_event *evt;
-	evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
-	if (evt) {
-		evt->pid = bpf_get_current_pid_tgid() >> 32;
-		bpf_get_current_comm(evt->comm, sizeof(evt->comm));
-		evt->ts = bpf_ktime_get_ns();
-		bpf_ringbuf_submit(evt, 0);
-	}
-
+	emit_event(BLOCK_REASON_COPYFAIL);
 	return -EPERM;
+}
+
+/* === DirtyFrag layer 1: block AF_RXRPC socket creation === */
+
+SEC("lsm/socket_create")
+int BPF_PROG(block_rxrpc, int family, int type, int protocol,
+	     int kern, int ret)
+{
+	if (ret)
+		return ret;
+
+	if (kern)
+		return 0;
+
+	if (family != AF_RXRPC)
+		return 0;
+
+	emit_event(BLOCK_REASON_RXRPC);
+	return -EPERM;
+}
+
+/* === DirtyFrag layer 2: block NETLINK_XFRM from containers === */
+
+SEC("lsm/socket_create")
+int BPF_PROG(block_xfrm, int family, int type, int protocol,
+	     int kern, int ret)
+{
+	if (ret)
+		return ret;
+
+	if (kern)
+		return 0;
+
+	if (family != AF_NETLINK || protocol != NETLINK_XFRM)
+		return 0;
+
+	struct task_struct *task = bpf_get_current_task_btf();
+	int level;
+
+	level = task->cred->user_ns->level;
+	if (level > 0)
+		goto block;
+
+	level = task->nsproxy->pid_ns_for_children->level;
+	if (level > 0)
+		goto block;
+
+	return 0;
+
+block:
+	emit_event(BLOCK_REASON_XFRM);
+	return -1;
+}
+
+/* === DirtyFrag layer 3: block MSG_SPLICE_PAGES on UDP sockets === */
+
+SEC("lsm/socket_sendmsg")
+int BPF_PROG(block_udp_splice, struct socket *sock,
+	     struct msghdr *msg, int size, int ret)
+{
+	if (ret)
+		return ret;
+
+	if (!(msg->msg_flags & MSG_SPLICE_PAGES))
+		return 0;
+
+	if (sock->type != SOCK_DGRAM)
+		return 0;
+
+	struct sock *sk = sock->sk;
+	if (!sk)
+		return 0;
+
+	__u16 family = sk->__sk_common.skc_family;
+	if (family != AF_INET && family != AF_INET6)
+		return 0;
+
+	emit_event(BLOCK_REASON_UDP_SPLICE);
+	return -1;
 }
 
 char LICENSE[] SEC("license") = "GPL";

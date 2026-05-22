@@ -5,8 +5,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <bpf/libbpf.h>
-#include "block_copyfail.h"
-#include "block_copyfail.skel.h"
+#include "mitigations.h"
+#include "mitigations.skel.h"
 
 static volatile sig_atomic_t running = 1;
 
@@ -52,7 +52,7 @@ static void parse_mitigations(struct mitigation_flags *f)
 		} else if (strcmp(tok, "udp_splice") == 0) {
 			f->udp_splice = 1;
 		} else {
-			fprintf(stderr, "block-copyfail: unknown mitigation '%s', ignoring\n", tok);
+			fprintf(stderr, "mitigation-loader: unknown mitigation '%s', ignoring\n", tok);
 		}
 	}
 }
@@ -78,27 +78,27 @@ static int handle_event(void *ctx, void *data, size_t len)
 	case BLOCK_REASON_UDP_SPLICE: what = "UDP MSG_SPLICE_PAGES";  break;
 	default:                      what = "unknown";               break;
 	}
-	fprintf(stderr, "block-copyfail: BLOCKED %s pid=%-8u comm=%.*s time=%s\n",
+	fprintf(stderr, "mitigation-loader: BLOCKED %s pid=%-8u comm=%.*s time=%s\n",
 		what, evt->pid, 16, evt->comm, ts);
 	return 0;
 }
 
 int main(int argc, char **argv)
 {
-	struct block_copyfail_bpf *skel;
+	struct mitigations_bpf *skel;
 	struct ring_buffer *rb;
 	struct mitigation_flags flags;
 
 	parse_mitigations(&flags);
 
 	if (!flags.copyfail && !flags.rxrpc && !flags.xfrm && !flags.udp_splice) {
-		fprintf(stderr, "block-copyfail: no mitigations enabled, exiting\n");
+		fprintf(stderr, "mitigation-loader: no mitigations enabled, exiting\n");
 		return 1;
 	}
 
-	skel = block_copyfail_bpf__open();
+	skel = mitigations_bpf__open();
 	if (!skel) {
-		fprintf(stderr, "block-copyfail: failed to open BPF skeleton\n");
+		fprintf(stderr, "mitigation-loader: failed to open BPF skeleton\n");
 		return 1;
 	}
 
@@ -111,19 +111,19 @@ int main(int argc, char **argv)
 	if (!flags.udp_splice)
 		bpf_program__set_autoattach(skel->progs.block_udp_splice, false);
 
-	if (block_copyfail_bpf__load(skel)) {
-		fprintf(stderr, "block-copyfail: failed to load BPF programs\n");
-		block_copyfail_bpf__destroy(skel);
+	if (mitigations_bpf__load(skel)) {
+		fprintf(stderr, "mitigation-loader: failed to load BPF programs\n");
+		mitigations_bpf__destroy(skel);
 		return 1;
 	}
 
-	if (block_copyfail_bpf__attach(skel)) {
-		fprintf(stderr, "block-copyfail: failed to attach BPF programs\n");
-		block_copyfail_bpf__destroy(skel);
+	if (mitigations_bpf__attach(skel)) {
+		fprintf(stderr, "mitigation-loader: failed to attach BPF programs\n");
+		mitigations_bpf__destroy(skel);
 		return 1;
 	}
 
-	fprintf(stderr, "block-copyfail: active mitigations:");
+	fprintf(stderr, "mitigation-loader: active mitigations:");
 	if (flags.copyfail)   fprintf(stderr, " copyfail");
 	if (flags.rxrpc)      fprintf(stderr, " rxrpc");
 	if (flags.xfrm)       fprintf(stderr, " xfrm");
@@ -133,8 +133,8 @@ int main(int argc, char **argv)
 	rb = ring_buffer__new(bpf_map__fd(skel->maps.events),
 			      handle_event, NULL, NULL);
 	if (!rb) {
-		fprintf(stderr, "block-copyfail: failed to create ring buffer\n");
-		block_copyfail_bpf__destroy(skel);
+		fprintf(stderr, "mitigation-loader: failed to create ring buffer\n");
+		mitigations_bpf__destroy(skel);
 		return 1;
 	}
 
@@ -150,8 +150,8 @@ int main(int argc, char **argv)
 	while (running)
 		ring_buffer__poll(rb, 250);
 
-	fprintf(stderr, "block-copyfail: detaching\n");
+	fprintf(stderr, "mitigation-loader: detaching\n");
 	ring_buffer__free(rb);
-	block_copyfail_bpf__destroy(skel);
+	mitigations_bpf__destroy(skel);
 	return 0;
 }

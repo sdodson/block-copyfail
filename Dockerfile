@@ -8,13 +8,13 @@ RUN dnf install -y \
     && dnf clean all
 
 WORKDIR /build
-COPY block_copyfail.bpf.c block_copyfail.h block_copyfail.c Makefile ./
+COPY mitigations.bpf.c mitigations.h mitigations.c Makefile ./
 RUN make
 
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
 RUN microdnf install -y libbpf elfutils-libelf zlib && microdnf clean all
 
-COPY --from=builder /build/block-copyfail /usr/local/bin/block-copyfail
+COPY --from=builder /build/mitigation-loader /usr/local/bin/mitigation-loader
 
-ENTRYPOINT ["/usr/local/bin/block-copyfail"]
+ENTRYPOINT ["/usr/local/bin/mitigation-loader"]

@@ -1,5 +1,5 @@
-#ifndef BLOCK_COPYFAIL_H
-#define BLOCK_COPYFAIL_H
+#ifndef MITIGATIONS_H
+#define MITIGATIONS_H
 
 #ifndef __bpf__
 #include <linux/types.h>

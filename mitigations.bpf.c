@@ -15,7 +15,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
-#include "block_copyfail.h"
+#include "mitigations.h"
 
 /* --- CopyFail: sockaddr_alg layout for AF_ALG AEAD detection --- */
 

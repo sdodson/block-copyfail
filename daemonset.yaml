@@ -8,7 +8,7 @@ metadata:
     pod-security.kubernetes.io/audit: privileged
     pod-security.kubernetes.io/warn: privileged
   annotations:
-    kubernetes.io/description: Mitigating kernel page-cache corruption vulnerabilities (CopyFail CVE-2026-31431 + DirtyFrag) with an eBPF DaemonSet.  This is a temporary workaround until the cluster can be updated to pick up a patched kernel.
+    kubernetes.io/description: Mitigating kernel page-cache corruption vulnerabilities (CVE-2026-31431, CVE-2026-43284, CVE-2026-46300) with an eBPF DaemonSet.  This is a temporary workaround until the cluster can be updated to pick up a patched kernel.
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -16,7 +16,7 @@ metadata:
   name: kernel-ebpf-lsm-loader
   namespace: openshift-cve-mitigations
   annotations:
-    kubernetes.io/description: Mitigating kernel page-cache corruption vulnerabilities (CopyFail + DirtyFrag) with an eBPF DaemonSet.  This is a temporary workaround until the cluster can be updated to pick up a patched kernel.
+    kubernetes.io/description: Mitigating kernel page-cache corruption vulnerabilities (CVE-2026-31431, CVE-2026-43284, CVE-2026-46300) with an eBPF DaemonSet.  This is a temporary workaround until the cluster can be updated to pick up a patched kernel.
 automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -25,7 +25,7 @@ metadata:
   name: system:openshift:scc:privileged
   namespace: openshift-cve-mitigations
   annotations:
-    kubernetes.io/description: Mitigating kernel page-cache corruption vulnerabilities (CopyFail + DirtyFrag) with an eBPF DaemonSet.  This is a temporary workaround until the cluster can be updated to pick up a patched kernel.
+    kubernetes.io/description: Mitigating kernel page-cache corruption vulnerabilities (CVE-2026-31431, CVE-2026-43284, CVE-2026-46300) with an eBPF DaemonSet.  This is a temporary workaround until the cluster can be updated to pick up a patched kernel.
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -43,7 +43,7 @@ metadata:
   labels:
     app: kernel-ebpf-lsm-loader
   annotations:
-    kubernetes.io/description: Mitigating kernel page-cache corruption vulnerabilities (CopyFail + DirtyFrag) with an eBPF DaemonSet.  This is a temporary workaround until the cluster can be updated to pick up a patched kernel.
+    kubernetes.io/description: Mitigating kernel page-cache corruption vulnerabilities (CVE-2026-31431, CVE-2026-43284, CVE-2026-46300) with an eBPF DaemonSet.  This is a temporary workaround until the cluster can be updated to pick up a patched kernel.
 spec:
   selector:
     matchLabels:

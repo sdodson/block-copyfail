@@ -1,22 +1,29 @@
 ## Summary
 
-This repo provides **zero-reboot BPF LSM mitigations** for two families of Linux
-kernel page-cache corruption vulnerabilities:
+This repo provides **zero-reboot BPF LSM mitigations** for Linux kernel
+page-cache corruption vulnerabilities:
 
-**CopyFail** (CVE-2026-31431) — privilege escalation via `algif_aead`.  An
+**CVE-2026-31431** — CopyFail.  Privilege escalation via `algif_aead`.  An
 attacker uses AF\_ALG sockets with the `authencesn` algorithm and `splice()` to
 corrupt arbitrary files in the page cache (e.g. `/usr/bin/su`).
 
-**DirtyFrag + Fragnesia** — privilege escalation via xfrm-ESP, rxrpc/rxkad,
-and ESP-in-TCP page-cache write paths.  Four attack vectors are blocked:
-- **AF\_RXRPC** socket creation globally (rxrpc/rxkad path)
+**CVE-2026-43284** — Dirty Frag (IPsec ESP).  Privilege escalation via
+xfrm-ESP page-cache write paths.  Two attack vectors are blocked:
 - **UDP MSG\_SPLICE\_PAGES** globally (splice-to-UDP primitive, kernel 6.4+)
-- **TCP\_ULP "espintcp"** globally (ESP-in-TCP / Fragnesia path)
 - **UDP\_ENCAP** from non-init net namespaces (ESP-in-UDP from containers)
 
-All mitigations are deployed as a single DaemonSet. By default every mitigation
-is active. Individual mitigations can be toggled via the `MITIGATIONS`
-environment variable on the DaemonSet.
+**CVE-2026-43500** — Dirty Frag (rxrpc).  Does not affect Red Hat products;
+disabled by default.  Blocks:
+- **AF\_RXRPC** socket creation globally (rxrpc/rxkad path)
+
+**CVE-2026-46300** — Fragnesia (ESP-in-TCP).  Privilege escalation via
+ESP-in-TCP page-cache write path.  Blocks:
+- **TCP\_ULP "espintcp"** globally (kTLS `"tls"` is unaffected)
+
+All mitigations are deployed as a single DaemonSet. By default the three CVEs
+affecting Red Hat products are active (CVE-2026-43500 is excluded). Individual
+mitigations can be toggled via the `MITIGATIONS` environment variable on the
+DaemonSet.
 
 ## Quick Start
 
@@ -33,7 +40,7 @@ oc apply -f daemonset.yaml
 # 4. Verify
 oc get pods -n openshift-cve-mitigations     # All nodes should show Running
 oc logs -n openshift-cve-mitigations -l app=kernel-ebpf-lsm-loader
-# Expected: "mitigation-loader: active mitigations: copyfail rxrpc udp_splice espintcp udp_encap"
+# Expected: "mitigation-loader: active mitigations: CVE-2026-31431 CVE-2026-43284 CVE-2026-46300"
 ```
 
 No reboots. No node drains. No pod restarts. Protection is immediate and
@@ -41,26 +48,25 @@ covers all processes on all nodes (100% coverage).
 
 ### Selecting Mitigations
 
-By default all mitigations are enabled (`MITIGATIONS=all`). To enable only
-specific mitigations, set the `MITIGATIONS` environment variable to a
-comma-separated list:
+By default the three CVEs affecting Red Hat products are enabled
+(`MITIGATIONS=all`). To enable only specific mitigations, set the `MITIGATIONS`
+environment variable to a comma-separated list of CVE numbers:
 
-| Value         | What it blocks                                      |
-|---------------|-----------------------------------------------------|
-| `all`         | All mitigations (default)                           |
-| `copyfail`    | AF\_ALG AEAD binds (CopyFail)                      |
-| `dirtyfrag`   | All DirtyFrag/Fragnesia layers                      |
-| `rxrpc`       | AF\_RXRPC socket creation                           |
-| `udp_splice`  | UDP MSG\_SPLICE\_PAGES                              |
-| `espintcp`    | TCP\_ULP "espintcp" (Fragnesia)                     |
-| `udp_encap`   | UDP\_ENCAP from containers                          |
+| Value              | What it enables                                           |
+|--------------------|-----------------------------------------------------------|
+| `all`              | CVE-2026-31431 + CVE-2026-43284 + CVE-2026-46300 (default) |
+| `all-cves`         | All four CVEs including CVE-2026-43500                    |
+| `CVE-2026-31431`   | CopyFail — AF\_ALG AEAD binds                            |
+| `CVE-2026-43284`   | Dirty Frag (IPsec ESP) — UDP splice + UDP\_ENCAP         |
+| `CVE-2026-43500`   | Dirty Frag (rxrpc) — AF\_RXRPC (not in `all`)            |
+| `CVE-2026-46300`   | Fragnesia — TCP\_ULP "espintcp"                          |
 
-Example — enable only CopyFail and the espintcp blocker:
+Example — enable only CopyFail and Fragnesia:
 
 ```yaml
 env:
 - name: MITIGATIONS
-  value: "copyfail,espintcp"
+  value: "CVE-2026-31431,CVE-2026-46300"
 ```
 
 ## Table of Contents
@@ -91,22 +97,30 @@ The exploit chains three kernel features:
 The attacker corrupts `/usr/bin/su` in the page cache (without write access to
 the file), then executes it to gain root.
 
-### DirtyFrag + Fragnesia
+### CVE-2026-43284 — Dirty Frag (IPsec ESP)
 
-These exploits corrupt the page cache through the kernel's network subsystems:
+Page-cache corruption through the kernel's IPsec/ESP network subsystem:
 
-1. **rxrpc/rxkad path** — AF\_RXRPC sockets allow the rxkad security class to
-   write into page-cache pages via the Rx protocol's large-packet reassembly
-2. **UDP splice primitive** — MSG\_SPLICE\_PAGES on UDP sockets lets the ESP
+1. **UDP splice primitive** — MSG\_SPLICE\_PAGES on UDP sockets lets the ESP
    decryption engine overwrite page-cache pages in place (kernel 6.4+)
-3. **ESP-in-TCP (Fragnesia)** — `setsockopt(TCP_ULP, "espintcp")` sets up
-   ESP decryption on a TCP socket, enabling the same page-cache corruption.
-   Blocked globally; kTLS (`"tls"`) is unaffected.
-4. **ESP-in-UDP from containers** — `setsockopt(UDP_ENCAP)` configures UDP
+2. **ESP-in-UDP from containers** — `setsockopt(UDP_ENCAP)` configures UDP
    encapsulation for IPsec.  Blocked from non-init net namespaces (containers)
    while preserving host-level IPsec/VPN.
 
-The BPF LSM blocks all four vectors independently.
+### CVE-2026-43500 — Dirty Frag (rxrpc)
+
+Does not affect Red Hat products.  Disabled by default.
+
+1. **rxrpc/rxkad path** — AF\_RXRPC sockets allow the rxkad security class to
+   write into page-cache pages via the Rx protocol's large-packet reassembly
+
+### CVE-2026-46300 — Fragnesia (ESP-in-TCP)
+
+Page-cache corruption through ESP-in-TCP:
+
+1. **ESP-in-TCP** — `setsockopt(TCP_ULP, "espintcp")` sets up ESP decryption
+   on a TCP socket, enabling the same page-cache corruption.  Blocked globally;
+   kTLS (`"tls"`) is unaffected.
 
 ---
 
@@ -158,7 +172,7 @@ oc delete namespace cve-2026-31431-test
 
 The BPF LSM approach hooks `socket_bind`, `socket_create`, `socket_sendmsg`,
 and `socket_setsockopt` at the kernel level to block the attack primitives used
-by CopyFail, DirtyFrag, and Fragnesia. Based on
+by CVE-2026-31431, CVE-2026-43284, and CVE-2026-46300. Based on
 [block-copyfail](https://github.com/atgreen/block-copyfail) and
 [block-dirtyfrag](https://github.com/mrunalp/block-dirtyfrag), rewritten in C
 with libbpf for OCP deployment.
@@ -231,7 +245,7 @@ Expected:
 
 ```
 mitigation-loader: init net namespace inum=4026531840
-mitigation-loader: active mitigations: copyfail rxrpc udp_splice espintcp udp_encap
+mitigation-loader: active mitigations: CVE-2026-31431 CVE-2026-43284 CVE-2026-46300
 ```
 
 ---
@@ -261,8 +275,8 @@ oc logs -n openshift-cve-mitigations -l app=kernel-ebpf-lsm-loader
 
 ```
 mitigation-loader: init net namespace inum=4026531840
-mitigation-loader: active mitigations: copyfail rxrpc udp_splice espintcp udp_encap
-mitigation-loader: BLOCKED AF_ALG AEAD bind pid=16777    comm=python3 time=2026-05-01 16:37:23
+mitigation-loader: active mitigations: CVE-2026-31431 CVE-2026-43284 CVE-2026-46300
+mitigation-loader: BLOCKED CVE-2026-31431 AF_ALG AEAD bind pid=16777    comm=python3 time=2026-05-01 16:37:23
 ```
 
 ### Verifying Other Algorithms Are Unaffected
@@ -311,8 +325,8 @@ This confirms the BPF LSM blocks all AEAD binds while leaving other AF_ALG types
 ## Building the Image from Source
 
 ```
-mitigations.bpf.c        # BPF kernel programs (CopyFail + DirtyFrag + Fragnesia)
-mitigations.c             # Userspace loader with MITIGATIONS env var parsing
+mitigations.bpf.c        # BPF kernel programs (CVE-2026-31431 + CVE-2026-43284 + CVE-2026-43500 + CVE-2026-46300)
+mitigations.c             # Userspace loader with MITIGATIONS env var parsing (accepts CVE numbers)
 mitigations.h             # Shared event struct and block reason constants
 Makefile                  # Build pipeline
 Dockerfile                # Multi-stage build

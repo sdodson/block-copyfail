@@ -24,13 +24,26 @@ struct mitigation_flags {
 	int udp_encap;
 };
 
+static void enable_all_default(struct mitigation_flags *f)
+{
+	f->copyfail = 1;
+	f->udp_splice = f->udp_encap = 1;
+	f->espintcp = 1;
+	f->rxrpc = 0;
+}
+
+static void enable_all_cves(struct mitigation_flags *f)
+{
+	enable_all_default(f);
+	f->rxrpc = 1;
+}
+
 static void parse_mitigations(struct mitigation_flags *f)
 {
 	const char *env = getenv("MITIGATIONS");
 
 	if (!env || !*env || strcmp(env, "all") == 0) {
-		f->copyfail = f->rxrpc = f->udp_splice = 1;
-		f->espintcp = f->udp_encap = 1;
+		enable_all_default(f);
 		return;
 	}
 
@@ -44,23 +57,20 @@ static void parse_mitigations(struct mitigation_flags *f)
 	for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
 		while (*tok == ' ') tok++;
 		if (strcmp(tok, "all") == 0) {
-			f->copyfail = f->rxrpc = f->udp_splice = 1;
-			f->espintcp = f->udp_encap = 1;
-		} else if (strcmp(tok, "copyfail") == 0) {
+			enable_all_default(f);
+		} else if (strcmp(tok, "all-cves") == 0) {
+			enable_all_cves(f);
+		} else if (strcmp(tok, "CVE-2026-31431") == 0) {
 			f->copyfail = 1;
-		} else if (strcmp(tok, "dirtyfrag") == 0) {
-			f->rxrpc = f->udp_splice = 1;
-			f->espintcp = f->udp_encap = 1;
-		} else if (strcmp(tok, "rxrpc") == 0) {
+		} else if (strcmp(tok, "CVE-2026-43284") == 0) {
+			f->udp_splice = f->udp_encap = 1;
+		} else if (strcmp(tok, "CVE-2026-43500") == 0) {
 			f->rxrpc = 1;
-		} else if (strcmp(tok, "udp_splice") == 0) {
-			f->udp_splice = 1;
-		} else if (strcmp(tok, "espintcp") == 0) {
+		} else if (strcmp(tok, "CVE-2026-46300") == 0) {
 			f->espintcp = 1;
-		} else if (strcmp(tok, "udp_encap") == 0) {
-			f->udp_encap = 1;
 		} else {
 			fprintf(stderr, "mitigation-loader: unknown mitigation '%s', ignoring\n", tok);
+			fprintf(stderr, "  valid values: all, all-cves, CVE-2026-31431, CVE-2026-43284, CVE-2026-43500, CVE-2026-46300\n");
 		}
 	}
 }
@@ -107,11 +117,11 @@ static int handle_event(void *ctx, void *data, size_t len)
 
 	strftime(ts, sizeof(ts), "%Y-%m-%d %H:%M:%S", tm);
 	switch (evt->reason) {
-	case BLOCK_REASON_COPYFAIL:   what = "AF_ALG AEAD bind";         break;
-	case BLOCK_REASON_RXRPC:      what = "AF_RXRPC socket";          break;
-	case BLOCK_REASON_UDP_SPLICE: what = "UDP MSG_SPLICE_PAGES";     break;
-	case BLOCK_REASON_ESPINTCP:   what = "TCP_ULP espintcp";         break;
-	case BLOCK_REASON_UDP_ENCAP:  what = "UDP_ENCAP from container"; break;
+	case BLOCK_REASON_COPYFAIL:   what = "CVE-2026-31431 AF_ALG AEAD bind";         break;
+	case BLOCK_REASON_RXRPC:      what = "CVE-2026-43500 AF_RXRPC socket";          break;
+	case BLOCK_REASON_UDP_SPLICE: what = "CVE-2026-43284 UDP MSG_SPLICE_PAGES";     break;
+	case BLOCK_REASON_ESPINTCP:   what = "CVE-2026-46300 TCP_ULP espintcp";         break;
+	case BLOCK_REASON_UDP_ENCAP:  what = "CVE-2026-43284 UDP_ENCAP from container"; break;
 	default:                      what = "unknown";                  break;
 	}
 	fprintf(stderr, "mitigation-loader: BLOCKED %s pid=%-8u comm=%.*s time=%s\n",
@@ -170,11 +180,11 @@ int main(int argc, char **argv)
 	}
 
 	fprintf(stderr, "mitigation-loader: active mitigations:");
-	if (flags.copyfail)   fprintf(stderr, " copyfail");
-	if (flags.rxrpc)      fprintf(stderr, " rxrpc");
-	if (flags.udp_splice) fprintf(stderr, " udp_splice");
-	if (flags.espintcp)   fprintf(stderr, " espintcp");
-	if (flags.udp_encap)  fprintf(stderr, " udp_encap");
+	if (flags.copyfail)   fprintf(stderr, " CVE-2026-31431");
+	if (flags.udp_splice || flags.udp_encap)
+		fprintf(stderr, " CVE-2026-43284");
+	if (flags.rxrpc)      fprintf(stderr, " CVE-2026-43500");
+	if (flags.espintcp)   fprintf(stderr, " CVE-2026-46300");
 	fprintf(stderr, "\n");
 
 	rb = ring_buffer__new(bpf_map__fd(skel->maps.events),

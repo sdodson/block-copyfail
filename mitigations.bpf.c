@@ -1,13 +1,18 @@
 /* BPF LSM programs to block kernel page-cache corruption exploits.
  *
- * CopyFail (CVE-2026-31431):
+ * CVE-2026-31431 — CopyFail:
  *   socket_bind — blocks AF_ALG AEAD binds (algif_aead exploit path).
  *
- * DirtyFrag + Fragnesia:
- *   socket_create — blocks AF_RXRPC socket creation (rxrpc/rxkad path).
+ * CVE-2026-43284 — Dirty Frag (IPsec ESP):
  *   socket_sendmsg — blocks MSG_SPLICE_PAGES on UDP sockets globally.
- *   tracepoint + socket_setsockopt — blocks TCP_ULP "espintcp" globally.
  *   socket_setsockopt — blocks UDP_ENCAP from non-init net namespaces.
+ *
+ * CVE-2026-43500 — Dirty Frag (rxrpc):
+ *   socket_create — blocks AF_RXRPC socket creation (rxrpc/rxkad path).
+ *   Does not affect Red Hat products; disabled by default.
+ *
+ * CVE-2026-46300 — Fragnesia (ESP-in-TCP):
+ *   tracepoint + socket_setsockopt — blocks TCP_ULP "espintcp" globally.
  */
 
 #include <linux/types.h>
@@ -18,7 +23,7 @@
 #include <bpf/bpf_core_read.h>
 #include "mitigations.h"
 
-/* --- CopyFail: sockaddr_alg layout for AF_ALG AEAD detection --- */
+/* --- CVE-2026-31431: sockaddr_alg layout for AF_ALG AEAD detection --- */
 
 #define SOCKADDR_ALG_TYPE_OFFSET 2
 #define SOCKADDR_ALG_CHECK_LEN 7
@@ -110,7 +115,7 @@ static __always_inline void emit_event(__u32 reason)
 	}
 }
 
-/* === CopyFail: block AF_ALG AEAD binds === */
+/* === CVE-2026-31431: block AF_ALG AEAD binds === */
 
 SEC("lsm/socket_bind")
 int BPF_PROG(block_copyfail, struct socket *sock,
@@ -138,7 +143,7 @@ int BPF_PROG(block_copyfail, struct socket *sock,
 	return -EPERM;
 }
 
-/* === DirtyFrag layer 1: block AF_RXRPC socket creation === */
+/* === CVE-2026-43500: block AF_RXRPC socket creation === */
 
 SEC("lsm/socket_create")
 int BPF_PROG(block_rxrpc, int family, int type, int protocol,
@@ -157,7 +162,7 @@ int BPF_PROG(block_rxrpc, int family, int type, int protocol,
 	return -EPERM;
 }
 
-/* === DirtyFrag layer 2: block MSG_SPLICE_PAGES on UDP sockets (6.4+) === */
+/* === CVE-2026-43284: block MSG_SPLICE_PAGES on UDP sockets (6.4+) === */
 
 SEC("lsm/socket_sendmsg")
 int BPF_PROG(block_udp_splice, struct socket *sock,
@@ -184,7 +189,7 @@ int BPF_PROG(block_udp_splice, struct socket *sock,
 	return -EPERM;
 }
 
-/* === Fragnesia layer 3: block TCP_ULP "espintcp" globally === */
+/* === CVE-2026-46300: block TCP_ULP "espintcp" globally === */
 
 /*
  * Tracepoint half: fires before the LSM hook in the same setsockopt
@@ -246,7 +251,7 @@ int BPF_PROG(block_espintcp, struct socket *sock, int level,
 	return 0;
 }
 
-/* === DirtyFrag layer 4: block UDP_ENCAP from non-init net namespace === */
+/* === CVE-2026-43284: block UDP_ENCAP from non-init net namespace === */
 
 SEC("lsm/socket_setsockopt")
 int BPF_PROG(block_udp_encap, struct socket *sock, int level,

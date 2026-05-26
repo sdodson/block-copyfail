@@ -82,7 +82,7 @@ env:
 
 ## How the Exploits Work
 
-### CopyFail (CVE-2026-31431)
+### CVE-2026-31431 — CopyFail
 
 The exploit chains three kernel features:
 
@@ -172,7 +172,8 @@ oc delete namespace cve-2026-31431-test
 
 The BPF LSM approach hooks `socket_bind`, `socket_create`, `socket_sendmsg`,
 and `socket_setsockopt` at the kernel level to block the attack primitives used
-by CVE-2026-31431, CVE-2026-43284, and CVE-2026-46300. Based on
+by CVE-2026-31431, CVE-2026-43284, CVE-2026-43500 (disabled by default),
+and CVE-2026-46300. Based on
 [block-copyfail](https://github.com/atgreen/block-copyfail) and
 [block-dirtyfrag](https://github.com/mrunalp/block-dirtyfrag), rewritten in C
 with libbpf for OCP deployment.

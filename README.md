@@ -1,7 +1,7 @@
 ## Summary
 
 This repo provides **zero-reboot BPF LSM mitigations** for Linux kernel
-page-cache corruption vulnerabilities:
+vulnerabilities:
 
 **CVE-2026-31431** — CopyFail.  Privilege escalation via `algif_aead`.  An
 attacker uses AF\_ALG sockets with the `authencesn` algorithm and `splice()` to
